@@ -23,63 +23,40 @@ app.use((req, res, next) => {
 });
 
 // Endpoint to fetch and save client data
-app.get("/fetch-client-data", async (req, res) => {
+app.post("/fetch-client-data", async (req, res) => {
   console.log("Entering fetch-client-data endpoint");
 
   try {
-    console.log("Fetching data...");
-    // const response = await axios.get(`${API_BASE_URL}/get-client-data`, {
-    //     //   headers: {
-    //     //     Authorization: `Bearer ${process.env.API_KEY}`, // Ensure the correct API key is being used here
-    //     //   },
-    //     // });
-    // For testing, using dummy data:
-    const response = {
-      data: {
-        website: "http://dummywebsite.com",
-        email: "dummyemail@example.com",
-        companyName: "Dummy Company",
-        phoneNumber: "123-456-7890",
-      },
-    };
+    let responseData = req.body;
 
-    console.log("Dummy data:", response.data);
-    // Extract the required data
-    const { website, email, companyName, phoneNumber } = response.data;
-
-    // Validate the response data
-    if (!website || !email || !companyName || !phoneNumber) {
-      return res.status(400).json({ error: "Incomplete data received" });
+    if (!responseData || Object.keys(responseData).length === 0) {
+      console.log("Fetching data from external API...");
+      const apiResponse = await axios.get(`${API_BASE_URL}/get-client-data`, {
+        headers: {
+          Authorization: `Bearer ${process.env.DUMMY_API_KEY}`, // Ensure the correct API key is used
+        },
+      });
+      responseData = apiResponse.data;
     }
 
-    // Create clientData object
+    const { website, email, companyName, phoneNumber } = responseData;
+    console.log("Received data:", { website, email, companyName, phoneNumber });
+
+    if (!companyName || (!email && !phoneNumber && !website)) {
+      return res.status(400).json({ error: "Incomplete data received. At least one identifier (email, phone, or website) is required." });
+    }
+
     const clientData = { website, email, companyName, phoneNumber };
 
-    // Prepare the HubSpot contact object
-    const contactObj = {
-      properties: {
-        email: clientData.email,
-        company: clientData.companyName, // You can map `companyName` to `firstname` or other fields based on your needs
-        phone: clientData.phoneNumber,
-        website: clientData.website,
-      },
-    };
-    const clientEmail = contactObj.properties.email;
-    const contactResponse = await axios.post(
+    // Search for an existing contact by email, phone number, or website
+    const filterGroups = [];
+    if (email) filterGroups.push({ filters: [{ propertyName: "email", operator: "EQ", value: email }] });
+    if (phoneNumber) filterGroups.push({ filters: [{ propertyName: "phone", operator: "EQ", value: phoneNumber }] });
+    if (website) filterGroups.push({ filters: [{ propertyName: "website", operator: "EQ", value: website }] });
+
+    const contactSearchResponse = await axios.post(
       `https://api.hubapi.com/crm/v3/objects/contacts/search`,
-      {
-        filterGroups: [
-          {
-            filters: [
-              {
-                propertyName: "email",
-                operator: "EQ",
-                value: clientEmail,
-              },
-            ],
-          },
-        ],
-      },
+      { filterGroups },
       {
         headers: {
           Authorization: `Bearer ${HUB_ACCESS_TOKEN}`,
@@ -87,21 +64,44 @@ app.get("/fetch-client-data", async (req, res) => {
         },
       }
     );
-    const results = contactResponse.data.results;
-    console.log("results", results);
-    const existingContactId =
-      results && results.length > 0 ? results[0].id : null;
+
+    const contactResults = contactSearchResponse.data.results;
+    let existingContactId = contactResults && contactResults.length > 0 ? contactResults[0].id : null;
     console.log("existingContactId", existingContactId);
-    if (existingContactId) {
-      // Step 2: Update the contact if it already exists
+
+    if (!existingContactId) {
+      console.log("Creating a new contact...");
+      const createContactResponse = await axios.post(
+        "https://api.hubapi.com/crm/v3/objects/contacts",
+        {
+          properties: {
+            email: clientData.email,
+            company: clientData.companyName,
+            phone: clientData.phoneNumber,
+            website: clientData.website,
+            existing_customer: "InActive Customer",
+          },
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${HUB_ACCESS_TOKEN}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+      existingContactId = createContactResponse.data.id;
+      console.log(`New contact created with ID: ${existingContactId}`);
+    } else {
+      console.log("Contact already exists. Updating contact...");
       await axios.patch(
         `https://api.hubapi.com/crm/v3/objects/contacts/${existingContactId}`,
         {
           properties: {
             email: clientData.email,
-            company: clientData.companyName, // You can map `companyName` to `firstname` or other fields based on your needs
+            company: clientData.companyName,
             phone: clientData.phoneNumber,
             website: clientData.website,
+            existing_customer: "Active Customer",
           },
         },
         {
@@ -112,44 +112,17 @@ app.get("/fetch-client-data", async (req, res) => {
         }
       );
       console.log(`Contact ${clientData.email} updated successfully.`);
-    } else {
-      // Step 3: Create a new contact if none exists
-      console.log("none exists");
-      await axios.post(
-        "https://api.hubapi.com/crm/v3/objects/contacts",
-        {
-          properties: {
-            email: clientData.email,
-            company: clientData.companyName, // You can map `companyName` to `firstname` or other fields based on your needs
-            phone: clientData.phoneNumber,
-            website: clientData.website,
-          },
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${HUB_ACCESS_TOKEN}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-      console.log(`Contact ${clientData.email} created successfully.`);
     }
-    // Check if the company exists
-    const clientcompany = contactObj.properties.company;
-    console.log("clientcompany", clientcompany);
 
-    // Search for the company by name (companyName)
+    // Search for an existing company
+    console.log("Searching for existing company...");
     const companyResponse = await axios.post(
       `https://api.hubapi.com/crm/v3/objects/companies/search`,
       {
         filterGroups: [
           {
             filters: [
-              {
-                propertyName: "name", // Use "name" to search for the company
-                operator: "EQ",
-                value: clientcompany,
-              },
+              { propertyName: "name", operator: "EQ", value: clientData.companyName },
             ],
           },
         ],
@@ -162,44 +135,16 @@ app.get("/fetch-client-data", async (req, res) => {
       }
     );
 
-    const Companyresults = companyResponse.data.results;
-    console.log("Companyresults", Companyresults);
+    let existingCompanyId = companyResponse?.data?.results?.length > 0 ? companyResponse.data.results[0].id : null;
+    console.log("existingCompanyId", existingCompanyId);
 
-    // Check if company exists
-    const existingCompanyId =
-      Companyresults && Companyresults.length > 0 ? Companyresults[0].id : null;
-
-
-    // If the company exists, associate the contact with the company
-    if (existingCompanyId) {
-      console.log("existingCompanyId", existingCompanyId);
-      // Associate contact with the company
-      const updateCompanyResponse = await axios.patch(
-        `https://api.hubapi.com/crm/v3/objects/companies/${existingCompanyId}`,
-        {
-          properties: {
-            name: clientData.companyName, // Mapping the company name to the correct property
-            phone: clientData.phoneNumber,
-            website: clientData.website,
-          },
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${HUB_ACCESS_TOKEN}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-      console.log("Company updated:", updateCompanyResponse.data);
-    }
-    else {
-      // Step 3: Create a new contact if none exists
-      console.log("none exists");
+    if (!existingCompanyId) {
+      console.log("Creating a new company...");
       const createCompanyResponse = await axios.post(
         "https://api.hubapi.com/crm/v3/objects/companies",
         {
           properties: {
-            name: clientData.companyName, // You can map `companyName` to `firstname` or other fields based on your needs
+            name: clientData.companyName,
             phone: clientData.phoneNumber,
             website: clientData.website,
           },
@@ -211,52 +156,33 @@ app.get("/fetch-client-data", async (req, res) => {
           },
         }
       );
-      console.log("New company created:", createCompanyResponse.data);
+      existingCompanyId = createCompanyResponse.data.id;
+      console.log(`New company created with ID: ${existingCompanyId}`);
     }
-    //Create Association
-    // console.log("existingContactId", existingContactId);
-    // const createAssociationResponse = await axios.put(
-    //   `https://api.hubapi.com/crm/v4/objects/contact/${existingContactId}/associations/companies/${existingCompanyId}`,
-    //   {
-    //     associationCategory: "HUBSPOT_DEFINED", // or any other valid category
-    //     associationTypeId: 1, // or any valid definition ID
-    //   },
-    //   {
-    //     headers: {
-    //       Authorization: `Bearer ${HUB_ACCESS_TOKEN}`,
-    //       "Content-Type": "application/json",
-    //     },
-    //   }
-
-    // );
-    // console.log("Association created:", createAssociationResponse.data);
-
-    console.log("existingContactId", existingContactId);
-    console.log("existingCompanyId", existingCompanyId);
 
     if (existingContactId && existingCompanyId) {
-      const createAssociationResponse = await axios.put(
-        `https://api.hubapi.com/crm/v3/objects/companies/${existingCompanyId}/associations/contacts/${existingContactId}/company_to_contact`,
-        {
-          associationCategory: "HUBSPOT_DEFINED", // or any other valid category
-          associationTypeId: 1, // or any valid definition ID
-
-        }, // Empty body
-        {
-          headers: {
-            Authorization: `Bearer ${HUB_ACCESS_TOKEN}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-      console.log("Association created:", createAssociationResponse.data);
-    } else {
-      console.error("Cannot create association: Missing contact or company ID");
+      console.log("Associating contact and company...");
+      try {
+        const createAssociationResponse = await axios.put(
+          `https://api.hubapi.com/crm/v3/objects/companies/${existingCompanyId}/associations/contacts/${existingContactId}/company_to_contact`,
+          {},
+          {
+            headers: {
+              Authorization: `Bearer ${HUB_ACCESS_TOKEN}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+        console.log("Association created successfully:", createAssociationResponse.data);
+      } catch (error) {
+        console.error("Failed to create association:", error.message);
+        console.error("Error details:", error.response?.data);
+      }
     }
-    // Return the data to the client
+
     res.status(200).json({
       message: "Client data fetched and saved successfully",
-      data: clientData, // Return clientData here
+      data: clientData,
     });
   } catch (error) {
     console.error("Error fetching or saving client data:", error.message);
